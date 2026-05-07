@@ -1,9 +1,7 @@
 require("dotenv").config();
-const { PrismaClient } = require("@prisma/client");
 const { faker } = require("@faker-js/faker");
 const bcrypt = require("bcryptjs");
-
-const prisma = new PrismaClient();
+const prisma = require("../src/prisma");
 
 async function main() {
     await prisma.comment.deleteMany();
@@ -40,12 +38,12 @@ async function main() {
             const post = await prisma.post.create({
                 data: {
                     content: faker.lorem.paragraph(),
-                    imageUrl: faker.datatype.boolean() ? faker.image.urlLoremFlickr({ category: "natue" }) : null,
+                    imageUrl: faker.datatype.boolean() ? faker.image.url() : null,
                     authorId: author.id
                 },
             });
 
-            const commenters = faker.helpers.arrayElement(users.filter((u) => u.id !== author.id), faker.number.int({ min: 0, max: 5 }));
+            const commenters = faker.helpers.arrayElements(users.filter((u) => u.id !== author.id), faker.number.int({ min: 0, max: 5 }));
             for (const commenter of commenters) {
                 await prisma.comment.create({
                     data: {
@@ -56,7 +54,7 @@ async function main() {
                 });
             }
 
-            const likers = faker.helpers.arrayElement(users.filter((u) => u.id !== author.id), faker.number.int({ min: 0, max: 8 }));
+            const likers = faker.helpers.arrayElements(users.filter((u) => u.id !== author.id), faker.number.int({ min: 0, max: 8 }));
             for (const liker of likers) {
                 await prisma.like.upsert({
                     where: {
@@ -64,7 +62,7 @@ async function main() {
                     },
                     update: {},
                     create: {
-                        userId: like.id,
+                        userId: liker.id,
                         postId: post.id,
                     },
                 });

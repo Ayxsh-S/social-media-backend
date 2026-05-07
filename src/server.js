@@ -4,6 +4,10 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const bcrypt = require("bcryptjs");
 
+const path = require("path");
+const fs = require("fs");
+const multer = require("multer");
+
 const prisma = require("./prisma");
 const { signToken } = require("./auth");
 const { requireAuth } = require("./middleware");
@@ -61,8 +65,32 @@ async function getFollowStatus(viewerId, targetId) {
     return "none";
 }
 
+const uploadDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+app.use("/uploads", express.static(uploadDir));
+
 app.get("/api/auth/me", requireAuth, async (req, res) => {
     res.json({ user: req.user });
+});
+
+const storage = multer.diskStorage({
+    destination: (_req, _file, cb) => {
+        cb(null, uploadDir);
+    },
+    filename: (_req, file, cb) => {
+        const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
+        cb(null, unique + path.extname(file.originalname));
+    },
+});
+
+const upload = multer({
+    storage,
+    limits: {
+        fileSize: 10*1024*1024, //10MB increase if big files needed
+    },
 });
 
 app.post("/api/auth/signup", async (req, res) => {
@@ -188,6 +216,70 @@ app.get("/api/users", requireAuth, async (req, res) => {
     res.json({ users: enriched });
 });
 
+app.get("/api/users/suggested", requireAuth, async (req, res) => {
+    const users = await prisma.user.findMany({
+        where: {
+            id: { not: req.user.id },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 6,
+        select: {
+            id: true,
+            name: true,
+            username: true,
+            bio: true,
+            avatarUrl: true,
+            createdAt: true,
+        },
+    });
+
+    const enriched = await Promise.all(
+        users.map(async (u) => ({
+            ...u,
+            followStatus: await getFollowStatus(req.user.id, u.id),
+        }))
+    );
+    
+    res.json({ users: enriched });
+});
+
+app.get("/api/users/search", requireAuth, async (req, res) => {
+    const q = String(req.query.q || "").trim().slice(0, 50);
+
+    if (!q) {
+        return res.json({ users: [] });
+    }
+
+    const users = await prisma.user.findMany({
+        where: {
+            id: { not: req.user.id },
+            OR: [
+                { name: { contains: q, mode: "insensitive" } },
+                { username: { contains: q, mode: "insensitive" } },
+            ],
+        },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+        select: {
+            id: true,
+            name: true,
+            username: true,
+            bio: true,
+            avatarUrl: true,
+            createdAt: true,
+        },
+    });
+
+    const enriched = await Promise.all(
+        users.map( async (u) => ({
+            ...u,
+            followStatus: await getFollowStatus(req.user.id, u.id),
+        }))
+    );
+
+    res.json({ users: enriched });
+});
+
 app.get("/api/users/:username", requireAuth, async (req, res) => {
     const user = await prisma.user.findUnique({
         where: { username: req.params.username },
@@ -234,18 +326,23 @@ app.get("/api/users/:username", requireAuth, async (req, res) => {
     res.json({ user: { ...user, followStatus } });
 });
 
-app.patch("/api/users/me", requireAuth, async (req, res) => {
-    const { name, bio, avatarUrl } = req.body;
-    const updated = await prisma.user.update({
-        where: { id: req.user.id },
-        data: {
-            ...(name !== undefined ? { name } : {}),
-            ...(bio !== undefined ? { bio } : {}),
-            ...(avatarUrl !== undefined ? { avatarUrl } : {}),
-        },
-    });
-    
-    res.json({ user: sanitiseUser(updated) });
+app.patch("/api/users/me", requireAuth, upload.single("avatar"), async (req, res) => {
+    try {
+        const { name, bio, avatarUrl } = req.body;
+        const updated = await prisma.user.update({
+            where: { id: req.user.id },
+            data: {
+                ...(name !== undefined ? { name } : {}),
+                ...(bio !== undefined ? { bio } : {}),
+                ...(req.file ? { avatarUrl: `/uploads/${req.file.filename}` } : avatarUrl !== undefined ? { avatarUrl } : {}),
+            },
+        });
+
+        res.json({ user: sanitiseUser(updated) });    
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ meesage: "Profile update failed." });
+    }
 });
 
 app.post("/api/users/:id/follow-request", requireAuth, async (req, res) => {
@@ -420,14 +517,16 @@ app.get("/api/posts/feed", requireAuth, async (req, res) => {
     res.json({ posts });
 });
 
-app.post("/api/posts", requireAuth, async (req, res) => {
-    const { content, imageUrl } = req.body;
+app.post("/api/posts", requireAuth, upload.single("file"), async (req, res) => {
+    const { content } = req.body;
     if (!content?.trim()) return res.status(400).json({ message: "Post content required" });
+
+    const fileUrl = req.file ? `/uploads/${req.file.filename}` : null;
 
     const post = await prisma.post.create({
         data: {
             content: content.trim(),
-            imageUrl: imageUrl?.trim() || null,
+            imageUrl: fileUrl,
             authorId: req.user.id,
         },
         include: {
@@ -442,7 +541,6 @@ app.post("/api/posts", requireAuth, async (req, res) => {
             likes: true,
             comments: {
                 orderBy: { createdAt: "asc" },
-
                 include: {
                     author: {
                         select: {
@@ -460,7 +558,7 @@ app.post("/api/posts", requireAuth, async (req, res) => {
     res.json({ post });
 });
 
-app.post("/api/posts/:id", requireAuth, async (req, res) => {
+app.get("/api/posts/:id", requireAuth, async (req, res) => {
     const post = await prisma.post.findUnique({
         where: { id: req.params.id },
         include: {
@@ -474,7 +572,7 @@ app.post("/api/posts/:id", requireAuth, async (req, res) => {
             },
             likes: true,
             comments: {
-                orderBy: { createdAt: "asc "},
+                orderBy: { createdAt: "asc"},
                 include: {
                     author: {
                         select: {
@@ -515,9 +613,26 @@ app.post("/api/posts/:id/like", requireAuth, async (req, res) => {
         where: { id: postId },
         include: {
             likes: true,
-            comments: true,
+            comments: {
+                orderBy: { createdAt: "asc" },
+                include: {
+                    author: {
+                        select: { 
+                            id: true, 
+                            name: true, 
+                            username: true, 
+                            avatarUrl: true 
+                        },
+                    },
+                },
+            },
             author: {
-                select: { id: true, name: true, username: true, avatarUrl: true },
+                select: {
+                    id: true,
+                    name: true,
+                    username: true,
+                    avatarUrl: true,
+                },
             },
         },
     });
@@ -551,12 +666,135 @@ app.post("/api/posts/:id/comments", requireAuth, async (req, res) => {
 });
 
 app.delete("/api/comments/:id", requireAuth, async (req, res) => {
-    const comment = await prisma.comment.findUnique({ where: { id: req.params } });
+    const comment = await prisma.comment.findUnique({ where: { id: req.params.id } });
     if (!comment) return res.status(404).json({ message: "Comment not found." });
     if (comment.userId !== req.user.id) return res.status(403).json({ message: "Forbidden." });
 
     await prisma.comment.delete({ where: { id: comment.id } });
     res.json({ ok: true });
+});
+
+async function canMessage(viewerId, targetId) {
+    if (viewerId === targetId) return false;
+
+    const relation = await prisma.followRequest.findUnique({
+        where: {
+            requesterId_recipientId: {
+                requesterId: viewerId,
+                recipientId: targetId,
+            },
+        },
+    });
+
+    return relation?.status === "ACCEPTED";
+}
+
+app.get("/api/messages/users", requireAuth, async (req, res) => {
+    const follows = await prisma.followRequest.findMany({
+        where: {
+            requesterId: req.user.id,
+            status: "ACCEPTED",
+        },
+        orderBy: { updatedAt: "desc" },
+        include: {
+            recipient: {
+                select: {
+                    id: true,
+                    name: true,
+                    username: true,
+                    avatarUrl: true,
+                },
+            },
+        },
+    });
+    const users = follows.map((f) => f.recipient);
+    res.json({ users });
+});
+
+app.get("/api/messages/:otherUserId", requireAuth, async(req, res) => {
+    const { otherUserId } = req.params;
+    const me = req.user.id;
+
+    const allowed = await canMessage(me, otherUserId);
+    if (!allowed) {
+        return res.status(403).json({ message: "You can only message people you follow." });
+    }
+
+    const messages = await prisma.message.findMany({
+        where: {
+            OR: [
+                { senderId: me, recipientId: otherUserId },
+                { senderId: otherUserId, recipientId: me }, 
+            ],
+        },
+        orderBy: { createdAt: "asc" },
+        include: {
+            sender: {
+                select: {
+                    id: true,
+                    name: true,
+                    username: true,
+                    avatarUrl: true,
+                },
+            },
+            recipient: {
+                select: {
+                    id: true,
+                    name: true,
+                    username: true,
+                    avatarUrl: true,
+                },
+            },
+        },
+    });
+
+    res.json({ messages });
+});
+
+app.post("/api/messages/:otherUserId", requireAuth, async (req, res) => {
+    const { otherUserId } = req.params;
+    const { content } = req.body;
+
+    if (!content?.trim()) {
+        return res.status(400).json({ message: "Message content required." });
+    }
+
+    if (otherUserId === req.user.id) {
+        return res.status(400).json({ message: "You cannot message yourself" });
+    }
+
+    const allowed = await canMessage(req.user.id, otherUserId);
+    if (!allowed) {
+        return res.status(403).json({ message: "You can only message people you follow." });
+    }
+
+    const message = await prisma.message.create({
+        data: {
+            content: content.trim(),
+            senderId: req.user.id,
+            recipientId: otherUserId,
+        },
+        include: {
+            sender: {
+                select: {
+                    id: true,
+                    name: true,
+                    username: true,
+                    avatarUrl: true,
+                },
+            },
+            recipient: {
+                select: {
+                    id: true,
+                    name: true,
+                    username: true,
+                    avatarUrl: true,
+                },
+            },
+        },
+    });
+
+    res.json({ message });
 });
 
 const port = process.env.PORT || 4000;

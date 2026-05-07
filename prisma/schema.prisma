@@ -15,7 +15,7 @@ enum FollowRequestStatus {
 model User {
     id String @id @default(cuid())
     name String
-    user String @unique
+    username String @unique
     email String @unique
     password String
     bio String @default("")
@@ -28,6 +28,8 @@ model User {
     comments Comment[]
     sentFollowRequests FollowRequest[] @relation("SentFollowRequests")
     receivedFollowRequests FollowRequest[] @relation("ReceivedFollowRequests")
+    sentMessages Message[] @relation("SentMessages")
+    receivedMessages Message[] @relation("ReceivedMessages")
 }
 
 model FollowRequest {
@@ -86,4 +88,17 @@ model Comment {
     post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
 
     @@index([postId, createdAt])
+}
+
+model Message {
+    id String @id @default(cuid())
+    content String
+    senderId String
+    recipientId String
+    createdAt DateTime @default(now())
+
+    sender User @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+    recipient User @relation("ReceivedMessages", fields: [recipientId], references: [id], onDelete: Cascade)
+
+    @@index([senderId, recipientId, createdAt])
 }
